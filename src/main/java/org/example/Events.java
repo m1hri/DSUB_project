@@ -9,7 +9,11 @@ import org.apache.kafka.streams.kstream.JoinWindows;
 import org.apache.kafka.streams.kstream.TimeWindows;
 
 import java.time.Duration;
+import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class Events {
 
@@ -33,52 +37,49 @@ public class Events {
                 Serdes.String().getClass()
         );
 
+        // Send updated results every second instead of every 30 seconds
+        props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 1000);
+        props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 0);
+
         StreamsBuilder builder = new StreamsBuilder();
         KStream<String, String> events =
                 builder.stream("group4__business-events");
-        
+
         KStream<String, String> rentals = events
-        .filter((key, value) ->
-                value.contains("\"event_type\": \"RENTAL\"")
-        )
-        .selectKey((key, value) -> extractRentalId(value));
+                .filter((key, value) ->
+                        value.contains("\"event_type\": \"RENTAL\"")
+                )
+                .selectKey((key, value) -> extractRentalId(value));
 
         KStream<String, String> payments = events
-        .filter((key, value) ->
-                value.contains("\"event_type\": \"PAYMENT\"")
-        )
-        .selectKey((key, value) -> extractRentalId(value));
+                .filter((key, value) ->
+                        value.contains("\"event_type\": \"PAYMENT\"")
+                )
+                .selectKey((key, value) -> extractRentalId(value));
 
         KStream<String, String> joinedRentals = rentals.join(
-        payments,
-        (rental, payment) -> extractStartStation(rental) + "," + extractAmount(payment),
-        JoinWindows.ofTimeDifferenceWithNoGrace(Duration.ofSeconds(30))
-);
+                payments,
+                (rental, payment) -> extractStartStation(rental) + "," + extractAmount(payment),
+                JoinWindows.ofTimeDifferenceWithNoGrace(Duration.ofSeconds(30))
+        );
 
-joinedRentals.foreach((rentalId, result) -> {
-    System.out.println("JOIN für rental_id: " + rentalId);
-    System.out.println(result);
-});
-KStream<String, String> revenueByStation = joinedRentals
-        .selectKey((rentalId, result) -> result.split(",")[0]);
-revenueByStation
-        .groupByKey()
-        .aggregate(
-                () -> "0.0",
-                (station, value, total) -> {
-                    double amount = Double.parseDouble(value.split(",")[1]);
-                    double newTotal = Double.parseDouble(total) + amount;
+        KStream<String, String> revenueByStation = joinedRentals
+                .selectKey((rentalId, result) -> result.split(",")[0]);
+        revenueByStation
+                .groupByKey()
+                .aggregate(
+                        () -> "0.0",
+                        (station, value, total) -> {
+                            double amount = Double.parseDouble(value.split(",")[1]);
+                            double newTotal = Double.parseDouble(total) + amount;
 
-                                        return String.valueOf(newTotal);
-                }
-        )
-        .toStream()
-        .foreach((station, total) -> {
-            System.out.println(
-                    "Start station: " + station
-                    + " | Total revenue: " + String.format("%.2f", Double.parseDouble(total)) + " CHF"
-            );
-        });
+                            return String.valueOf(newTotal);
+                        }
+                )
+                .toStream()
+                .foreach((station, total) ->
+                        REVENUE.put(station, Double.parseDouble(total))
+                );
         events
                 .filter((key, value) ->
                         value.contains("\"event_type\": \"RENTAL_RETURNED\"")
@@ -111,26 +112,51 @@ revenueByStation
                     int count = Integer.parseInt(parts[0]);
                     int totalDuration = Integer.parseInt(parts[1]);
 
-                    System.out.println(
-                            "Vehicle type: " + key.key()
-                                    + " | Rentals: " + count
-                                    + " | Average duration: "
-                                    + String.format(
-                                    "%.2f",
-                                    (double) totalDuration / count
-                            )
-                                    + " minutes"
-                    );
+                    VEHICLES.put(key.key(), new double[]{count, (double) totalDuration / count});
                 });
 
 
         KafkaStreams streams =
                 new KafkaStreams(builder.build(), props);
 
+        // Show errors in the console (otherwise the stream can stop silently)
+        streams.setUncaughtExceptionHandler(e -> {
+            System.err.println("Stream error: " + e);
+            return org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler
+                    .StreamThreadExceptionResponse.SHUTDOWN_CLIENT;
+        });
+
         Runtime.getRuntime().addShutdownHook(
                 new Thread(streams::close)
         );
         streams.start();
+
+        // Print the tables every 10 seconds
+        Executors.newSingleThreadScheduledExecutor()
+                .scheduleAtFixedRate(Events::printTables, 10, 10, TimeUnit.SECONDS);
+    }
+
+    private static final Map<String, Double> REVENUE = new ConcurrentSkipListMap<>();
+    private static final Map<String, double[]> VEHICLES = new ConcurrentSkipListMap<>();
+
+    private static void printTables() {
+        System.out.println();
+        System.out.println("+----------------+-------------+");
+        System.out.println("| Station        | Revenue CHF |");
+        System.out.println("+----------------+-------------+");
+        if (REVENUE.isEmpty()) System.out.println("| waiting for data ...         |");
+        REVENUE.forEach((station, total) ->
+                System.out.printf("| %-14s | %11.2f |%n", station, total));
+        System.out.println("+----------------+-------------+");
+
+        System.out.println();
+        System.out.println("+----------------+---------+--------------+");
+        System.out.println("| Vehicle type   | Rentals | Avg duration |");
+        System.out.println("+----------------+---------+--------------+");
+        if (VEHICLES.isEmpty()) System.out.println("| waiting for data ...                    |");
+        VEHICLES.forEach((type, v) ->
+                System.out.printf("| %-14s | %7d | %8.1f min |%n", type, (int) v[0], v[1]));
+        System.out.println("+----------------+---------+--------------+");
     }
 
     private static String extractVehicleType(String json) {
@@ -152,27 +178,27 @@ revenueByStation
         return Integer.parseInt(duration);
     }
     private static String extractRentalId(String json) {
-    String search = "\"rental_id\": ";
-    int start = json.indexOf(search) + search.length();
-    int end = json.indexOf(",", start);
+        String search = "\"rental_id\": ";
+        int start = json.indexOf(search) + search.length();
+        int end = json.indexOf(",", start);
 
-    return json.substring(start, end).trim();
-}
-private static String extractStartStation(String json) {
-    String search = "\"start_station\": \"";
-    int start = json.indexOf(search) + search.length();
-    int end = json.indexOf("\"", start);
+        return json.substring(start, end).trim();
+    }
+    private static String extractStartStation(String json) {
+        String search = "\"start_station\": \"";
+        int start = json.indexOf(search) + search.length();
+        int end = json.indexOf("\"", start);
 
-    return json.substring(start, end);
-}
-private static double extractAmount(String json) {
-    String search = "\"amount\": ";
-    int start = json.indexOf(search) + search.length();
-    int end = json.indexOf("}", start);
+        return json.substring(start, end);
+    }
+    private static double extractAmount(String json) {
+        String search = "\"amount\": ";
+        int start = json.indexOf(search) + search.length();
+        int end = json.indexOf("}", start);
 
-    String amount = json.substring(start, end).trim();
+        String amount = json.substring(start, end).trim();
 
-    return Double.parseDouble(amount);
-}
+        return Double.parseDouble(amount);
+    }
 
 }
