@@ -75,8 +75,8 @@ revenueByStation
         .toStream()
         .foreach((station, total) -> {
             System.out.println(
-                    "Startstation: " + station
-                    + " | Gesamtumsatz: " + String.format("%.2f", Double.parseDouble(total)) + " CHF"
+                    "Start station: " + station
+                    + " | Total revenue: " + String.format("%.2f", Double.parseDouble(total)) + " CHF"
             );
         });
         events
