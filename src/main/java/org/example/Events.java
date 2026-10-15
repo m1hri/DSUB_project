@@ -5,6 +5,7 @@ import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.JoinWindows;
 import org.apache.kafka.streams.kstream.TimeWindows;
 
 import java.time.Duration;
@@ -21,7 +22,7 @@ public class Events {
         );
         props.put(
                 StreamsConfig.BOOTSTRAP_SERVERS_CONFIG,
-                "localhost:9092"
+                "192.168.111.1:9092"
         );
         props.put(
                 StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG,
@@ -34,8 +35,50 @@ public class Events {
 
         StreamsBuilder builder = new StreamsBuilder();
         KStream<String, String> events =
-                builder.stream("business-events");
+                builder.stream("group4__business-events");
+        
+        KStream<String, String> rentals = events
+        .filter((key, value) ->
+                value.contains("\"event_type\": \"RENTAL\"")
+        )
+        .selectKey((key, value) -> extractRentalId(value));
 
+        KStream<String, String> payments = events
+        .filter((key, value) ->
+                value.contains("\"event_type\": \"PAYMENT\"")
+        )
+        .selectKey((key, value) -> extractRentalId(value));
+
+        KStream<String, String> joinedRentals = rentals.join(
+        payments,
+        (rental, payment) -> extractStartStation(rental) + "," + extractAmount(payment),
+        JoinWindows.ofTimeDifferenceWithNoGrace(Duration.ofSeconds(30))
+);
+
+joinedRentals.foreach((rentalId, result) -> {
+    System.out.println("JOIN für rental_id: " + rentalId);
+    System.out.println(result);
+});
+KStream<String, String> revenueByStation = joinedRentals
+        .selectKey((rentalId, result) -> result.split(",")[0]);
+revenueByStation
+        .groupByKey()
+        .aggregate(
+                () -> "0.0",
+                (station, value, total) -> {
+                    double amount = Double.parseDouble(value.split(",")[1]);
+                    double newTotal = Double.parseDouble(total) + amount;
+
+                                        return String.valueOf(newTotal);
+                }
+        )
+        .toStream()
+        .foreach((station, total) -> {
+            System.out.println(
+                    "Startstation: " + station
+                    + " | Gesamtumsatz: " + String.format("%.2f", Double.parseDouble(total)) + " CHF"
+            );
+        });
         events
                 .filter((key, value) ->
                         value.contains("\"event_type\": \"RENTAL_RETURNED\"")
@@ -108,5 +151,28 @@ public class Events {
                 .trim();
         return Integer.parseInt(duration);
     }
+    private static String extractRentalId(String json) {
+    String search = "\"rental_id\": ";
+    int start = json.indexOf(search) + search.length();
+    int end = json.indexOf(",", start);
+
+    return json.substring(start, end).trim();
+}
+private static String extractStartStation(String json) {
+    String search = "\"start_station\": \"";
+    int start = json.indexOf(search) + search.length();
+    int end = json.indexOf("\"", start);
+
+    return json.substring(start, end);
+}
+private static double extractAmount(String json) {
+    String search = "\"amount\": ";
+    int start = json.indexOf(search) + search.length();
+    int end = json.indexOf("}", start);
+
+    String amount = json.substring(start, end).trim();
+
+    return Double.parseDouble(amount);
+}
 
 }

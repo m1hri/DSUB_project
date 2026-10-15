@@ -11,7 +11,7 @@ public class EventGenerator {
     public static void main(String[] args) {
 
         Properties props = new Properties();
-        props.put("bootstrap.servers", "localhost:9092");
+        props.put("bootstrap.servers", "192.168.111.1:9092");
         props.put("key.serializer",
                 "org.apache.kafka.common.serialization.StringSerializer");
         props.put("value.serializer",
@@ -20,15 +20,21 @@ public class EventGenerator {
         KafkaProducer<String, String> producer =
                 new KafkaProducer<>(props);
 
-        String topic = "business-events";
+        String topic = "group4__business-events";
 
         Random random = new Random();
 
+        int nextRentalId = 1000;
         while (true) {
 
-            int eventType = random.nextInt(3);
+        int rentalId = nextRentalId++;
+        int customerId = 1 + random.nextInt(10);
+        int vehicleId = 101 + random.nextInt(8);
+        String vehicleType = getVehicleType(random);
 
-            String event;
+        for (int eventType = 0; eventType < 3; eventType++) {
+
+         String event;
 
             if (eventType == 0) {
                 event = """
@@ -41,10 +47,10 @@ public class EventGenerator {
                           "start_station": "%s"
                         }
                         """.formatted(
-                        1000 + random.nextInt(100),
-                        1 + random.nextInt(10),
-                        101 + random.nextInt(8),
-                        getVehicleType(random),
+                        rentalId,
+                        customerId,
+                        vehicleId,
+                        vehicleType,
                         getStation(random)
                 );
 
@@ -59,9 +65,9 @@ public class EventGenerator {
                           "rental_duration_minutes": %d
                         }
                         """.formatted(
-                        1000 + random.nextInt(100),
-                        101 + random.nextInt(8),
-                        getVehicleType(random),
+                        rentalId,
+                        vehicleId,
+                        vehicleType,
                         getStation(random),
                         30 + random.nextInt(61)
                 );
@@ -76,16 +82,22 @@ public class EventGenerator {
                           "amount": %.2f
                         }
                         """.formatted(
-                        1000 + random.nextInt(100),
-                        1 + random.nextInt(10),
+                        rentalId,
+                        customerId,
                         getAgeGroup(random),
                         5 + random.nextDouble() * 30
                 );
             }
 
-            producer.send(
-                    new ProducerRecord<>("business-events", event)
-            );
+            try {
+                producer.send(
+                new ProducerRecord<>(topic, event)
+                ).get();
+                System.out.println("Kafka hat das Event bestätigt!");
+                } catch (Exception e) {
+                System.err.println("Kafka-Versand fehlgeschlagen: " + e.getMessage());
+            break;
+}
 
             System.out.println("Sent event: " + event);
 
@@ -96,6 +108,7 @@ public class EventGenerator {
                 break;
             }
         }
+    }
     }
 
     private static String getVehicleType(Random random) {
