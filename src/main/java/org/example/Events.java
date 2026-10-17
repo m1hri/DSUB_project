@@ -22,7 +22,7 @@ public class Events {
         Properties props = new Properties();
         props.put(
                 StreamsConfig.APPLICATION_ID_CONFIG,
-                "vehicle-rental-stream"
+                "vehicle-rental-stream-v2"
         );
         props.put(
                 StreamsConfig.BOOTSTRAP_SERVERS_CONFIG,
@@ -66,20 +66,33 @@ public class Events {
         KStream<String, String> revenueByStation = joinedRentals
                 .selectKey((rentalId, result) -> result.split(",")[0]);
         revenueByStation
-                .groupByKey()
-                .aggregate(
-                        () -> "0.0",
-                        (station, value, total) -> {
-                            double amount = Double.parseDouble(value.split(",")[1]);
-                            double newTotal = Double.parseDouble(total) + amount;
+        .groupByKey()
+        .aggregate(
+                () -> "0,0.0",
+                (station, value, stats) -> {
+                    String[] parts = stats.split(",");
 
-                            return String.valueOf(newTotal);
-                        }
-                )
-                .toStream()
-                .foreach((station, total) ->
-                        REVENUE.put(station, Double.parseDouble(total))
-                );
+                    int count = Integer.parseInt(parts[0]) + 1;
+                    double total = Double.parseDouble(parts[1]);
+
+                    double amount =
+                            Double.parseDouble(value.split(",")[1]);
+
+                    double newTotal = total + amount;
+
+                    return count + "," + newTotal;
+                }
+        )
+        .toStream()
+        .foreach((station, stats) -> {
+            String[] parts = stats.split(",");
+
+            int count = Integer.parseInt(parts[0]);
+            double total = Double.parseDouble(parts[1]);
+
+            REVENUE.put(station, new double[]{count, total});
+        });
+
         events
                 .filter((key, value) ->
                         value.contains("\"event_type\": \"RENTAL_RETURNED\"")
@@ -136,18 +149,28 @@ public class Events {
                 .scheduleAtFixedRate(Events::printTables, 10, 10, TimeUnit.SECONDS);
     }
 
-    private static final Map<String, Double> REVENUE = new ConcurrentSkipListMap<>();
+    private static final Map<String, double[]> REVENUE = new ConcurrentSkipListMap<>();
     private static final Map<String, double[]> VEHICLES = new ConcurrentSkipListMap<>();
 
     private static void printTables() {
         System.out.println();
-        System.out.println("+----------------+-------------+");
-        System.out.println("| Station        | Revenue CHF |");
-        System.out.println("+----------------+-------------+");
-        if (REVENUE.isEmpty()) System.out.println("| waiting for data ...         |");
-        REVENUE.forEach((station, total) ->
-                System.out.printf("| %-14s | %11.2f |%n", station, total));
-        System.out.println("+----------------+-------------+");
+        System.out.println("+----------------+---------+-------------+");
+        System.out.println("| Station        | Rentals | Revenue CHF |");
+        System.out.println("+----------------+---------+-------------+");
+
+        if (REVENUE.isEmpty()) {
+        System.out.println("| waiting for data ...                  |");
+        }
+
+        REVENUE.forEach((station, stats) ->
+        System.out.printf(
+                "| %-14s | %7d | %11.2f |%n",
+                station,
+                (int) stats[0],
+                stats[1]
+        )
+        );
+        System.out.println("+----------------+---------+-------------+");
 
         System.out.println();
         System.out.println("+----------------+---------+--------------+");
